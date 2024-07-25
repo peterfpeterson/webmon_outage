@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 import json
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FormatStrFormatter
 import numpy as np
 import pandas as pd
+import matplotlib.dates as mdates
 
 ######################################################################
 # This is focused on the period from just before to just after
@@ -29,17 +31,17 @@ runs_save.duration /= 3600.0
 
 instruments = np.unique(runs_save.instr)
 
-fig = plt.figure(layout="constrained")
-fig.subplots_adjust(wspace=0)
-ax = fig.subplots(2, 1, sharex="col")
+fig, ax = plt.subplots(
+    2, 1, sharex="col", layout="constrained", gridspec_kw={"wspace": 0, "hspace": 0}
+)
 fig.tight_layout()
 for instr in instruments:
     mask = runs_save.instr == instr
-    if np.count_nonzero(mask) < 15:  # only show things with a minimum number of runs
+    if np.count_nonzero(mask) < 5:  # only show things with a minimum number of runs
         continue
     ax[0].scatter(runs_save.endtime[mask], runs_save.duration[mask], label=instr)
 ax[0].set_ylabel("acquisition (in hour)")
-ax[0].legend()
+ax[0].legend(ncol=2)
 
 ax[1].set_xlabel("time-of-day")
 
@@ -72,9 +74,11 @@ with open("AR_restarts", "r") as handle:
 
 CAT_STARTED = "/queue/CATALOG.ONCAT.STARTED:"
 REDUX_STARTED = "/queue/REDUCTION.STARTED:"
+REDUX_COMPLETE = "/queue/REDUCTION.COMPLETE:"
 REDUX_DISABLED = "/queue/REDUCTION.DISABLED:"
 REDUX_CAT_STARTED = "/queue/REDUCTION_CATALOG.STARTED:"
 REDUX_CREATE_SCRIPT = "/queue/REDUCTION.CREATE_SCRIPT:"
+REDUX_DATA_READY = "/queue/REDUCTION.DATA_READY:"
 
 
 def loadPostProcLog(filename):
@@ -89,7 +93,7 @@ def loadPostProcLog(filename):
             "/queue/CATALOG.ONCAT.DATA_READY:",
             CAT_STARTED,
             "/queue/CATALOG.ONCAT.COMPLETE:",
-            "/queue/REDUCTION.DATA_READY:",
+            REDUX_DATA_READY,
             REDUX_STARTED,
             "/queue/REDUCTION.COMPLETE:",
             REDUX_DISABLED,
@@ -162,6 +166,7 @@ def loadPostProcLog(filename):
 
     timestamps = []
     messages = []
+    kinds = []
     with open(filename) as handle:
         for line in handle:
             if line.startswith("2024-07-"):
@@ -171,6 +176,16 @@ def loadPostProcLog(filename):
                 message = line.replace(timestamp, "").strip()
                 # parse the timestampe
                 timestamps.append(timestamp.split(",")[0])
+                # set the type of the message
+                if REDUX_STARTED in message:
+                    kinds.append(REDUX_STARTED)
+                elif REDUX_COMPLETE in message:
+                    kinds.append(REDUX_COMPLETE)
+                elif REDUX_DATA_READY in message:
+                    kinds.append(REDUX_DATA_READY)
+                else:
+                    kinds.append("UNKNOWN")
+                # set the message log
                 messages.append(cleanMsg(message))
 
     timestamps = pd.to_datetime(np.asarray(timestamps), format=r"%Y-%m-%d %H:%M:%S")
@@ -178,24 +193,83 @@ def loadPostProcLog(filename):
     #    if True:  # msg.startswith("WARN"):
     #        print(stmp, msg)
     print(f"THERE ARE {len(timestamps)} messages")
-    # df = pd.DataFrame((timestamps, messages), columns=["time", "message"])
-    df = pd.DataFrame({"time": timestamps, "message": messages})
-    return df
+    return pd.DataFrame({"time": timestamps, "message": messages, "kind": kinds})
 
 
+##### errors reported by workflow-manager logs
+ONCAT_ERROR = "CATALOG.ONCAT.ERROR"
+CATALOG_ERROR = "CATALOG.ERROR"
+REDUCTION_ENV = "REDUCTION: Failed to find launcher:"
+REDUCTION_ERROR = "REDUCTION.ERROR"
+NO_FILE = "Data file does not exist or is not readable"
+CALVERA = "CALVERA.RAW.ERROR"
+
+
+def parseWkflwMgr(filename):
+    with open(filename, "r") as handle:
+        times = []
+        messages = []
+        kinds = []
+        for line in handle:
+            if "error" in line or "ERROR" in line or "Error" in line:
+                item = json.loads(line.strip())
+                if item["log"].startswith("SyntaxError"):
+                    continue
+                times.append(item["time"])
+                messages.append(item["log"])
+
+                if ONCAT_ERROR in item["log"]:
+                    kinds.append(ONCAT_ERROR)
+                elif CATALOG_ERROR in item["log"]:
+                    kinds.append(CATALOG_ERROR)
+                elif CALVERA in item["log"]:
+                    kinds.append(CALVERA)
+                elif NO_FILE in item["log"]:
+                    kinds.append(NO_FILE)
+                elif REDUCTION_ENV in item["log"]:
+                    kinds.append(REDUCTION_ENV)
+                elif REDUCTION_ERROR in item["log"]:
+                    kinds.append(REDUCTION_ERROR)
+                else:
+                    kinds.append("UNKNOWN")
+        times = pd.to_datetime(np.asarray(times), format="ISO8601")
+        times -= np.timedelta64(4, "h")
+        return pd.DataFrame({"time": times, "message": messages, "kind": kinds})
+
+
+wkflw = parseWkflwMgr("workflow_manager_20240711_20240715.log")
+print("There are", wkflw.size, "data manager errors")
+
+for kind, offset in (
+    ("UNKNOWN", 3.0),
+    (ONCAT_ERROR, 3.1),
+    (CATALOG_ERROR, 3.1),
+    (CALVERA, 3.1),
+    (REDUCTION_ENV, 3.2),
+    (REDUCTION_ERROR, 3.3),
+    (NO_FILE, 3.6),
+):
+    mask = wkflw.kind == kind
+    count = np.count_nonzero(mask)
+    ax[1].scatter(wkflw.time[mask], np.zeros(count) + offset)
+
+##### information from AR logs
 for AR_NUM in (1, 2, 4):
+    # when messages come through
     stuff = loadPostProcLog(f"AR{AR_NUM}_postprocessing.log")
 
     mask = stuff.message == "HEARTBEAT"
     ax[1].scatter(
-        stuff.time[mask], np.zeros(np.count_nonzero(mask), dtype=float) + AR_NUM
+        stuff.time[mask],
+        np.zeros(np.count_nonzero(mask), dtype=float) + AR_NUM,
+        color="red",
     )
 
-    for keyword, offset in (
-        (CAT_STARTED, 0.1),
-        (REDUX_STARTED, 0.2),
-        (REDUX_DISABLED, 0.2),
-        (REDUX_CAT_STARTED, 0.3),
+    for keyword, offset, color in (
+        (CAT_STARTED, 0.1, "orange"),
+        (REDUX_DISABLED, 0.2, "green"),
+        (REDUX_STARTED, 0.2, "blue"),
+        (REDUX_CAT_STARTED, 0.3, "orange"),
     ):
         mask = np.zeros(stuff.message.size, dtype=bool)
         for i, msg in enumerate(stuff.message):
@@ -203,9 +277,31 @@ for AR_NUM in (1, 2, 4):
         ax[1].scatter(
             stuff.time[mask],
             np.zeros(np.count_nonzero(mask), dtype=float) + (AR_NUM + offset),
+            color=color,
         )
 
+for ar in (1, 2, 4):
+    ymin, ymax = float(ar) - 0.1, float(ar) + 0.6
+    for timestamp in ar_restarts[f"autoreducer{ar}"]:
+        ax[1].vlines(timestamp, ymin, ymax, color="black")
+
+# add annotation about extra nodes giving POSTPROCESSING.ERROR
+# adding 4 hours for time-zone shift
+start, stop = (
+    np.datetime64("2024-07-13T10:22:06"),
+    np.datetime64("2024-07-13T12:45:10"),
+)
+ax[1].plot((start, stop), (3.5, 3.5), linewidth=4)
+ax[1].text(start, 3.6, "AR5/AR6")
+
+# ax[1].set_ylabel("node")
+ax[1].yaxis.set_major_formatter(FormatStrFormatter("AR%d"))
+ax[1].set_yticks((1, 2, 3, 4))
+ax[1].xaxis.set_major_formatter(mdates.DateFormatter("%dT%H:%M"))
+
+time_min, time_max = np.min(runs_save.endtime), np.max(runs_save.endtime)
 for axis in ax:
     axis.label_outer()
+    axis.set_xlim((time_min, time_max))
 
 fig.show()
