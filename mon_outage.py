@@ -153,13 +153,36 @@ def parseWkflwMgr(filename):
         times = []
         messages = []
         kinds = []
+        facility = []
+        instrument = []
+        proposal = []
+        runnum = []
         for line in handle:
             if "error" in line or "ERROR" in line or "Error" in line:
                 item = json.loads(line.strip())
                 if item["log"].startswith("SyntaxError"):
                     continue
                 times.append(item["time"])
-                messages.append(item["log"])
+                msg = item["log"]
+                messages.append(msg)
+
+                try:
+                    start = msg.index("'facility'")
+                    stop = msg.rindex("'data_file'")
+                    runid = [
+                        item.strip().replace("'", "")
+                        for item in msg[start:stop].split(",")
+                    ][:4]
+                    runid = [item.split(":")[1].strip().upper() for item in runid]
+                    facility.append(runid[0])
+                    instrument.append(runid[1])
+                    proposal.append(runid[2])
+                    runnum.append(runid[3])
+                except ValueError:  # indexing didn't work
+                    facility.append("UNKNOWN")
+                    instrument.append("UNKNOWN")
+                    proposal.append("UNKNOWN")
+                    runnum.append("UNKNOWN")
 
                 if ONCAT_ERROR in item["log"]:
                     kinds.append(ONCAT_ERROR)
@@ -177,7 +200,17 @@ def parseWkflwMgr(filename):
                     kinds.append("UNKNOWN")
         times = pd.to_datetime(np.asarray(times), format="ISO8601")
         times -= np.timedelta64(4, "h")
-        return pd.DataFrame({"time": times, "message": messages, "kind": kinds})
+        return pd.DataFrame(
+            {
+                "time": times,
+                "message": messages,
+                "kind": kinds,
+                "facility": facility,
+                "instrument": instrument,
+                "proposal": proposal,
+                "runnum": runnum,
+            }
+        )
 
 
 if __name__ == "__main__":
