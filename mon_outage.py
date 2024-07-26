@@ -32,18 +32,21 @@ runs_save.duration /= 3600.0
 instruments = np.unique(runs_save.instr)
 
 fig, ax = plt.subplots(
-    2, 1, sharex="col", layout="constrained", gridspec_kw={"wspace": 0, "hspace": 0}
+    3, 1, sharex="col", layout="constrained", gridspec_kw={"wspace": 0, "hspace": 0}
 )
 fig.tight_layout()
 for instr in instruments:
     mask = runs_save.instr == instr
     if np.count_nonzero(mask) < 5:  # only show things with a minimum number of runs
         continue
-    ax[0].scatter(runs_save.endtime[mask], runs_save.duration[mask], label=instr)
-ax[0].set_ylabel("acquisition (in hour)")
+    ax[0].scatter(
+        runs_save.endtime[mask], runs_save.duration[mask], label=instr, marker="."
+    )
+ax[0].set_ylabel("DAQ duration (in hour)")
 ax[0].legend(ncol=2)
+# ax[0].set_ylim(0, 800./3600)
 
-ax[1].set_xlabel("time-of-day")
+ax[2].set_xlabel("time-of-day")
 
 
 time_range = runs_save.endtime[runs_save.endtime.size - 1] - runs_save.endtime[0]
@@ -120,7 +123,7 @@ def loadPostProcLog(filename):
             stuff = json.loads(msg)
 
             # reduce the text and return
-            msg = f"{stuff['facility']} {stuff['instrument']} {stuff['ipts']} {stuff['run_number']}"
+            msg = f"{stuff['facility']} {stuff['instrument'].upper()} {stuff['ipts']} {stuff['run_number']}"
         except Exception as e:
             raise RuntimeError(msg) from e
 
@@ -251,7 +254,11 @@ for kind, offset in (
 ):
     mask = wkflw.kind == kind
     count = np.count_nonzero(mask)
-    ax[1].scatter(wkflw.time[mask], np.zeros(count) + offset)
+    ax[2].scatter(wkflw.time[mask], np.zeros(count) + offset, marker=".")
+
+# ax3 = ax[0].twinx()
+ax[1].set_ylabel("redux duration (in s)")
+
 
 ##### information from AR logs
 for AR_NUM in (1, 2, 4):
@@ -259,10 +266,11 @@ for AR_NUM in (1, 2, 4):
     stuff = loadPostProcLog(f"AR{AR_NUM}_postprocessing.log")
 
     mask = stuff.message == "HEARTBEAT"
-    ax[1].scatter(
+    ax[2].scatter(
         stuff.time[mask],
         np.zeros(np.count_nonzero(mask), dtype=float) + AR_NUM,
         color="red",
+        marker=".",
     )
 
     for keyword, offset, color in (
@@ -274,16 +282,69 @@ for AR_NUM in (1, 2, 4):
         mask = np.zeros(stuff.message.size, dtype=bool)
         for i, msg in enumerate(stuff.message):
             mask[i] = bool("/queue/REDUCTION.STARTED: " in msg)
-        ax[1].scatter(
+        ax[2].scatter(
             stuff.time[mask],
             np.zeros(np.count_nonzero(mask), dtype=float) + (AR_NUM + offset),
             color=color,
+            marker=".",
         )
+
+    # add information about reduction times
+    mask = np.logical_or(stuff.kind == REDUX_DATA_READY, stuff.kind == REDUX_COMPLETE)
+    kind = np.asarray(stuff.kind[mask])
+    timestamp = np.asarray(stuff.time[mask])
+    message = np.asarray(stuff.message[mask])
+    print("BEFORE:", kind.size, "of", stuff.size)
+
+    # clean out things before the first start
+    index = np.where(kind == REDUX_DATA_READY)[0][0]
+    kind = kind[index:]
+    timestamp = timestamp[index:]
+    message = message[index:]
+
+    times = []
+    durations = []
+
+    counter = 0
+    skipped = 0
+    while counter < kind.size:  # everything should be the same size
+        if counter + 1 >= kind.size:
+            break
+        if kind[counter] == REDUX_DATA_READY and kind[counter + 1] == REDUX_COMPLETE:
+            runid = message[counter].split()[-4:]
+            runid_next = message[counter + 1].split()[-4:]
+            if runid == runid_next:
+                # print(counter, timestamp[counter], kind[counter], runid)
+                # print("  to", timestamp[counter+1], kind[counter+1], runid)
+                times.append(timestamp[counter])
+                durations.append(
+                    (timestamp[counter + 1] - timestamp[counter])
+                    / np.timedelta64(1, "s")
+                )
+                counter += 2
+            else:
+                print(
+                    f"SOMETHING IS WRONG with {AR_NUM}",
+                    timestamp[counter],
+                    runid,
+                    runid_next,
+                )
+                counter += 1
+        else:
+            # print("skipping" , timestamp[counter], kind[counter], message[counter])
+            skipped += 1
+            counter += 1
+    print("AFTER:", kind.size, "skipped", skipped)
+    times = np.asarray(times)
+    durations = np.asarray(durations)
+    ax[1].scatter(times, durations, marker=".", label=f"AR{AR_NUM}")
+
+ax[1].legend()
 
 for ar in (1, 2, 4):
     ymin, ymax = float(ar) - 0.1, float(ar) + 0.6
     for timestamp in ar_restarts[f"autoreducer{ar}"]:
-        ax[1].vlines(timestamp, ymin, ymax, color="black")
+        ax[2].vlines(timestamp, ymin, ymax, color="black")
 
 # add annotation about extra nodes giving POSTPROCESSING.ERROR
 # adding 4 hours for time-zone shift
@@ -291,13 +352,13 @@ start, stop = (
     np.datetime64("2024-07-13T10:22:06"),
     np.datetime64("2024-07-13T12:45:10"),
 )
-ax[1].plot((start, stop), (3.5, 3.5), linewidth=4)
-ax[1].text(start, 3.6, "AR5/AR6")
+ax[2].plot((start, stop), (3.5, 3.5), linewidth=4)
+ax[2].text(start, 3.6, "AR5/AR6")
 
 # ax[1].set_ylabel("node")
-ax[1].yaxis.set_major_formatter(FormatStrFormatter("AR%d"))
-ax[1].set_yticks((1, 2, 3, 4))
-ax[1].xaxis.set_major_formatter(mdates.DateFormatter("%dT%H:%M"))
+ax[2].yaxis.set_major_formatter(FormatStrFormatter("AR%d"))
+ax[2].set_yticks((1, 2, 3, 4))
+ax[2].xaxis.set_major_formatter(mdates.DateFormatter("%dT%H:%M"))
 
 time_min, time_max = np.min(runs_save.endtime), np.max(runs_save.endtime)
 for axis in ax:
